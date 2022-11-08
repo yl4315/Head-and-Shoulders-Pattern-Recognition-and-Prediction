@@ -1,6 +1,6 @@
 # Head-and-Shoulders-Pattern-Recognition-and-Prediction
 
 
-## [PowerPoint](https://yl4315.github.io/Head-and-Shoulders-Pattern-Recognition-and-Prediction/Head and Shoulders Pattern Recognition and Prediction.pptx)
-## [Coding (R Markdown](https://yl4315.github.io/Head-and-Shoulders-Pattern-Recognition-and-Prediction/Head and Shoulders Pattern Recognition and Prediction.Rmd)
-## [Coding in R](https://yl4315.github.io/Head-and-Shoulders-Pattern-Recognition-and-Prediction/Coding.pdf)
+## https://docs.google.com/a/[PowerPoint]/viewer?url=[https://yl4315.github.io/Head-and-Shoulders-Pattern-Recognition-and-Prediction/Head%20and%20Shoulders%20Pattern%20Recognition%20and%20Prediction.pptx]
+## https://docs.google.com/a/[Coding (R Markdown]/viewer?url=[https://yl4315.github.io/Head-and-Shoulders-Pattern-Recognition-and-Prediction/Head%20and%20Shoulders%20Pattern%20Recognition%20and%20Prediction.Rmd]
+## https://docs.google.com/a/[Coding in R]/viewer?url=[https://yl4315.github.io/Head-and-Shoulders-Pattern-Recognition-and-Prediction/Coding.pdf]
