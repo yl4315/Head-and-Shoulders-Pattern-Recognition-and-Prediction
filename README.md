@@ -1,0 +1,1 @@
+# Head-and-Shoulders-Pattern-Recognition-and-Prediction
