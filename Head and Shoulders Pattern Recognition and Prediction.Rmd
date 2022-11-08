@@ -1,0 +1,1044 @@
+---
+title: "Head and Shoulders Pattern Detection"
+author: "Chenxi Wang | Rongbing Liang | Yena Lee"
+date: "April 19, 2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r}
+# DJI <- read.csv("DJI.csv")
+HO_raw <- read.table("HO-5min.asc", sep = ",", header = TRUE)
+
+HO.df = HO_raw[,1:6]
+HO.df$Date = as.Date(HO.df$Date,"%m/%d/%y")
+temp = function(x) {x=x*100}
+HO.df[,3:6] = apply(HO.df[3:6],2,temp)
+HO1 = subset(HO.df,Date>="2010-01-01"&Date<="2014-01-01")
+```
+
+
+```{r, message=FALSE}
+library(sm)
+library(quantmod)
+```
+
+
+# STEP 1: Smoothing & Find Extrema on Original Data
+
+```{r}
+find.extrema <- function(dat, windowlen) {
+  
+  n <- length(dat)
+  t <- 1:n
+ 
+  # fit kernel regression with cross-validation
+  h <- h.select(t, dat, method = "cv")
+  ks_p <- c()
+  
+  for (i in 1:(n-windowlen+1)) {
+    ks <- ksmooth(t[i:(i+windowlen-1)], dat[i:(i+windowlen-1)], 
+                  kernel = c("normal"), bandwidth = h, 
+                  n.points = windowlen, x.points = i+windowlen-1)
+    ks_p <- c(ks_p, ks$y)
+  }
+  
+  # find estimated fit
+  dat_sm <- ks_p
+  
+  second_deriv <- diff(sign(diff(dat_sm)))
+  temp_loc <- which(second_deriv != 0 ) + 1 # index of extrema in smoothed data
+  loc_dir <- -sign(second_deriv[temp_loc-1]) # direction of extrema, 
+                                             # +1 for max, -1 for min
+  
+  dat <- dat[windowlen:n] # make original data the same length as smoothed data
+  
+  # find index of extrema in original data
+  loc <- rep(0, length(temp_loc))
+  for (e in 1:length(temp_loc)) {
+    
+    if (e == 1) {
+      if (loc_dir[e] == 1) {
+        # find max from start to E0
+        loc[e] <- which.max(dat[1:temp_loc[e]])
+      } else {
+        # find min from start to E0
+        loc[e] <- which.min(dat[1:temp_loc[e]])
+      }
+      
+    } else {
+      if (loc_dir[e] == 1) {
+        # find max from E[e-1] to E[e]
+        loc[e] <- temp_loc[e-1] + which.max(dat[temp_loc[e-1]:temp_loc[e]]) - 1
+      } else {
+        # find min from E[e-1] to E[e]
+        loc[e] <- temp_loc[e-1] + which.min(dat[temp_loc[e-1]:temp_loc[e]]) - 1
+      }
+    }
+  }
+  
+  return(list(data = dat, 
+              data_sm = dat_sm, 
+              extrema_loc = loc, 
+              extrema_dir = loc_dir, 
+              extrema_sm = temp_loc, 
+              bandwidth = h))
+}
+```
+
+
+```{r}
+windowlen <- 66
+dat <- HO1$Close[1:500]
+check <- find.extrema(dat, windowlen)
+
+n <- length(dat)
+t <- windowlen:n
+plot(t, check$data, type = "l", col = "black")
+lines(t, check$data_sm, col = "red")
+points(t[check$extrema_loc], check$data[check$extrema_loc], 
+       col = "green", pch = 16)
+check$bandwidth
+```
+
+
+# STEP 2: Define Patterns Trying to Find
+
+```{r}
+# Define HS pattern
+HS <- list()
+HS$len <- 5
+HS$start <- 1 # start with a maximum
+HS$formula <- expression({
+  avg.top <- (E1 + E5) / 2
+  avg.bot <- (E2 + E4) / 2
+  
+  # E3 > E1, E3 > E5
+  E3 > E1 &
+  E3 > E5 &
+     
+  # E1 and E5 are within 1.5% of their average
+  abs(E1 - avg.top) < 0.015 * avg.top &
+  abs(E5 - avg.top) < 0.015 * avg.top &
+    
+  # E2 and E4 are within 1.5% of their average
+  abs(E2 - avg.bot) < 0.015 * avg.bot &
+  abs(E4 - avg.bot) < 0.015 * avg.bot
+})
+```
+
+
+```{r}
+# Define half-HS pattern, with only E1, E2, E3
+HHS <- list()
+HHS$len <- 3
+HHS$start <- 1 # start with a maximum
+HHS$formula <- expression({
+  # E3 > E1, E1 > E2
+  E3 > E1 &
+  E1 > E2 # This is actually unnecassary since follwing max E1, E2 must be a min
+})
+```
+
+
+# STEP 3: Find Patterns in Original Data
+
+```{r}
+find.pattern <- function(extrema, pattern) {
+  # ============
+  # extrema: list object, output from find.extrema()
+  # pattern: list object, defined for each technical pattern
+  # ============
+  
+  data_orig <- extrema$data # original data
+  data_sm <- extrema$data_sm # smoothed data
+  extrema_loc <- extrema$extrema_loc
+  extrema_dir <- extrema$extrema_dir
+  n <- length(extrema_loc)
+  
+  # search for patterns
+  pattern_starts <- c()
+  for (i in 1:n) {
+    
+    # check E1
+    if (pattern$start == extrema_dir[i]) {
+      
+      # check that there is suffcient number of extrema to complete pattern
+      if ((i + pattern$len - 1) <= n) {
+        
+        # create enviroment to check pattern
+        # Slice the 5 points in ORIGINAL data for evaluation
+        envir_data = c(data_orig[extrema_loc][i:(i + pattern$len - 1)], 
+                       extrema_loc[i:(i + pattern$len - 1)])
+        
+        names(envir_data) = c(paste('E', 1:pattern$len, sep=''), 
+                              paste('t', 1:pattern$len, sep=''))
+        
+        envir_data = as.list(envir_data)                    
+                                         
+        # check if pattern was found
+        if (eval(pattern$formula, envir = envir_data)) {
+          pattern_starts <- c(pattern_starts, i)
+        }
+      }
+    }       
+  }
+  
+  return(pattern_starts)
+}
+```
+
+
+# Splitting Positive and Negative Cases
+
+```{r}
+# Find complete HS, i.e. positive cases
+check_pattern <- find.pattern(check, HS)
+check_pattern # locations of E1
+
+# Find half HS, i.e. both positive and negative cases
+check_all <- find.pattern(check, HHS)
+check_all 
+#intersect(check_pattern, check_all) == check_pattern
+
+# Extract negative cases
+check_neg <- setdiff(check_all, check_pattern)
+check_neg
+```
+
+
+# Plotting HS
+
+```{r}
+# plot complete HS in one graph
+if (!is.null(check_pattern)) {
+  plot(t, check$data, type = "l", col = "black")
+  lines(t, check$data_sm, col = "red")
+  points(t[check$extrema_loc], check$data_sm[check$extrema_loc], 
+         col = "green", pch = 16)
+  
+  for (extrema_idx in check_pattern) {
+    
+    extrema_idxes <- (extrema_idx-1):(extrema_idx + HS$len)
+    data_idxes <- check$extrema_loc[extrema_idxes]
+
+    lines(t[data_idxes], check$data_sm[data_idxes], 
+          col = rgb(0, 0, 1, alpha = 0.3), lwd = 7)
+  }
+}
+
+# plot E0 and E6
+for (extrema_idx in check_pattern){
+  
+  extrema_idxes <- (extrema_idx - 1):(extrema_idx + HS$len)
+  data_idxes <- check$extrema_loc[extrema_idxes]
+  zoom1 = max(data_idxes[1]-windowlen*0.5,0)
+  zoom2 = data_idxes[5]+windowlen*0.5
+  
+  plot(t[zoom1:zoom2], check$data[zoom1:zoom2], type = "l", col = "black")
+  lines(t[zoom1:zoom2], check$data_sm[zoom1:zoom2], col = "red")
+  points(t[check$extrema_loc], check$data[check$extrema_loc], 
+         col = "green", pch = 16)
+  lines(t[data_idxes], check$data[data_idxes], 
+        col = rgb(0, 0, 1, alpha = 0.3), lwd = 7)
+}
+```
+
+
+
+
+
+
+
+# economic expansion dataset
+```{r}
+HO1 = subset(HO.df,Date>="2010-01-01"&Date<="2018-01-01")
+
+dat1=HO1$Close
+check1 <- find.extrema(dat1, windowlen)
+
+n <- length(dat1)
+t <- windowlen:n
+
+
+```
+
+## average time lag
+
+
+```{r}
+
+temp1=check1$extrema_loc
+temp2=check1$extrema_sm
+
+
+mean(temp2-temp1)+1 #(5min) this is average time we need to find an extrema when it appears 
+
+mean(diff(temp1)) # (5min) this is average duration between each extrema. 
+
+
+
+```
+
+#attach indexes to dataset
+
+```{r}
+
+
+
+# dataset define
+data=as.data.frame(dat1[t])
+colnames(data)=c('Price')
+
+data$Price_change=HO1$Close[t]-HO1$Open[t]
+data$Return=data$Price_change/HO1$Open[t]
+
+data$HS_Eloc=rep(NA,nrow(data))
+
+data$HHS_Eloc=rep(NA,nrow(data))
+
+```
+
+```{r}
+
+check_pattern <- find.pattern(check1, HS)
+ # locations of E1
+
+# Find half HS, i.e. both positive and negative cases
+check_all <- find.pattern(check1, HHS)
+
+#intersect(check_pattern, check_all) == check_pattern
+
+# Extract negative cases
+check_neg <- setdiff(check_all, check_pattern)
+
+
+
+```
+
+
+# positive cases location 
+```{r}
+
+temp=0:6
+
+for (extrema_idx in check_pattern){
+  
+  extrema_idxes <- (extrema_idx - 1):(extrema_idx + HS$len)
+  data_idxes <- check1$extrema_loc[extrema_idxes]
+  
+  temp=rbind(temp,data_idxes)   
+  
+  
+}
+
+Pos_loc=as.data.frame(temp[-1,])
+ 
+colnames(Pos_loc)=c('E0','E1','E2','E3','E4','E5','E6')
+
+
+```
+
+# negative case location
+```{r}
+
+temp=0:4
+
+for (extrema_idx in check_neg){
+  
+  extrema_idxes <- (extrema_idx - 1):(extrema_idx + HHS$len)
+  data_idxes <- check1$extrema_loc[extrema_idxes]
+  
+  temp=rbind(temp,data_idxes)   
+  
+  
+}
+
+Neg_loc=as.data.frame(temp[-1,])
+ 
+colnames(Neg_loc)=c('tE0','tE1','tE2','tE3','tE4')
+
+
+```
+
+
+# construct dataset of HS 
+```{r}
+
+data$org_index=1:nrow(data)
+data$lag1=Lag(data$Price_change,k=1)
+data$lag2=Lag(data$Price_change,k=2)
+data$lag3=Lag(data$Price_change,k=3)
+data$lag4=Lag(data$Price_change,k=4)
+data$lag5=Lag(data$Price_change,k=5)
+
+temp=data.frame()
+for( i in 1:nrow(Pos_loc) ){
+
+  tempE0=Pos_loc[i,1]
+  tempE6=Pos_loc[i,7]
+  
+  for(j in 0:6){
+    data$HS_Eloc[Pos_loc[i,j+1]]=j
+    
+    
+  }
+  
+  tempHS=data[tempE0:tempE6,]
+  temp=rbind(temp,tempHS)
+  
+  
+  data$HS_Eloc=rep(NA,nrow(data))
+  
+}
+
+  
+  
+  
+data_HS=temp  
+rownames(data_HS)=1:nrow(data_HS)
+
+```
+
+# get normal series dataset (without HS)
+
+```{r}
+
+temp1=data$org_index
+temp2=data_HS$org_index
+
+temp3=setdiff(temp1,temp2)
+
+data_normal=data[data$org_index %in% temp3,]
+
+```
+
+
+#statistical feature #(measured by price change) 
+```{r}
+library(PerformanceAnalytics)
+
+pchg_norm=data_normal$Price_change
+pchg_HS=data_HS$Price_change
+#mean
+mean(pchg_norm)
+mean(pchg_HS)
+#
+t.test(pchg_norm,pchg_HS)
+# std
+sd(pchg_norm)
+sd(pchg_HS)
+
+```
+
+
+```{r}
+kurtosis(pchg_norm)
+kurtosis(pchg_HS)
+
+
+skewness(pchg_norm)
+skewness(pchg_HS)
+
+
+```
+
+#acf
+```{r}
+test=cor.test(pchg_norm,data_normal$lag1)
+
+cor(pchg_norm,data_normal$lag1,use = "complete.obs")
+
+
+cor.test(pchg_HS,data_HS$lag1)
+
+cor(pchg_HS,data_HS$lag1,use = "complete.obs")
+
+
+
+cor.test(pchg_norm,data_normal$lag2)
+
+cor(pchg_norm,data_normal$lag2,use = "complete.obs")
+
+
+cor.test(pchg_HS,data_HS$lag2)
+
+cor(pchg_HS,data_HS$lag2,use = "complete.obs")
+
+
+
+cor.test(pchg_norm,data_normal$lag3)
+
+cor(pchg_norm,data_normal$lag3,use = "complete.obs")
+
+
+cor.test(pchg_HS,data_HS$lag3)
+
+cor(pchg_HS,data_HS$lag3,use = "complete.obs")
+
+
+
+```
+
+```{r}
+# autocorrelation function and test
+
+
+acf_normal=c()
+acf_HS=c()
+p_n=c()
+p_HS=c()
+temp.df=data[,1:6]
+
+for (i in 1:10) {
+
+temp.df$templag=Lag(temp.df$Price_change,k=i)
+temp=data.frame()
+for( i in 1:nrow(Pos_loc) ){
+  tempE0=Pos_loc[i,1]
+  tempE6=Pos_loc[i,7]
+  tempHS=temp.df[tempE0:tempE6,]
+  temp=rbind(temp,tempHS)
+}
+
+  
+temp.df_HS=temp  
+temp1=temp.df$org_index
+temp2=temp.df_HS$org_index
+temp3=setdiff(temp1,temp2)
+temp_normal=temp.df[temp.df$org_index %in% temp3,]
+
+temp4=temp_normal$Price_change
+temp5=temp_normal$templag
+rho=cor(temp4,temp5,use = "complete.obs")
+acf_normal=c(acf_normal,rho)
+test=cor.test(temp4,temp5)
+p_n=c(p_n,test$p.value)
+
+
+temp4=temp.df_HS$Price_change
+temp5=temp.df_HS$templag
+rho=cor(temp4,temp5,use = "complete.obs")
+acf_HS=c(acf_HS,rho)
+test=cor.test(temp4,temp5)
+p_HS=c(p_HS,test$p.value)
+
+
+
+}
+
+rbind(acf_normal,p_n)
+
+
+rbind(acf_HS,p_HS)
+
+
+
+```
+
+
+
+#plot acf
+```{r}
+
+
+par(mfrow=c(1,2))
+lag=1:10
+
+plot(lag,acf_HS,col="2",type='h',main="ACF of HS pattern series")
+abline(h=0)
+
+plot(lag,acf_normal,col="2",type='h',main="ACF of Normal series")
+abline(h=0)
+
+
+
+
+```
+
+
+
+# construct learning sample from data_HS
+```{r}
+
+
+Pos_data=Pos_loc[,1:4]
+rownames(Pos_data)=1:nrow(Pos_data)
+
+colnames(Pos_data)=c('tE0','tE1','tE2','tE3')
+
+
+Pos_data$E0=rep(NA,nrow(Pos_data))
+Pos_data$E1=rep(NA,nrow(Pos_data))
+Pos_data$E2=rep(NA,nrow(Pos_data))
+Pos_data$E3=rep(NA,nrow(Pos_data))
+Pos_data$mean=rep(NA,nrow(Pos_data))
+
+Pos_data$std=rep(NA,nrow(Pos_data))
+Pos_data$kur=rep(NA,nrow(Pos_data))
+Pos_data$skew=rep(NA,nrow(Pos_data))
+Pos_data$acf1=rep(NA,nrow(Pos_data))
+Pos_data$acf2=rep(NA,nrow(Pos_data))
+Pos_data$tail=rep(NA,nrow(Pos_data))
+Pos_data$HS=rep(1,nrow(Pos_data))
+
+for( i in 1:nrow(Pos_data) ){
+
+  tempE0=Pos_loc[i,1]
+  tempE3=Pos_loc[i,4]
+  tempE2=Pos_loc[i,3]
+  tempE1=Pos_loc[i,2]
+  
+  
+  tempHS=data[tempE0:tempE3,]
+  Pos_data$E0[i]=data$Price[tempE0]
+  Pos_data$E1[i]=data$Price[tempE1]
+  Pos_data$E2[i]=data$Price[tempE2]
+  Pos_data$E3[i]=data$Price[tempE3]
+  Pos_data$mean[i]=mean(tempHS$Price_change)
+  Pos_data$std[i]=sd(tempHS$Price_change)
+  Pos_data$kur[i]=kurtosis(tempHS$Price_change)
+  Pos_data$skew[i]=skewness(tempHS$Price_change)
+  Pos_data$acf1[i]=cor(tempHS$Price_change,tempHS$lag1,use = "complete.obs")
+  Pos_data$acf2[i]=cor(tempHS$Price_change,tempHS$lag2,use = "complete.obs") 
+ Pos_data$tail[i]=data$Price[tempE3+2]
+  
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+#negative case
+```{r}
+
+
+
+temp=data.frame()
+for( i in 1:nrow(Neg_loc) ){
+
+  tempE0=Neg_loc[i,1]
+  tempE4=Neg_loc[i,5]
+  
+  for(j in 0:4){
+    data$HHS_Eloc[Neg_loc[i,j+1]]=j
+    
+    
+  }
+  
+  tempHHS=data[tempE0:tempE4,]
+  temp=rbind(temp,tempHHS)
+  
+  
+  data$HHS_Eloc=rep(NA,nrow(data))
+  
+}
+
+  
+  
+  
+data_HHS=temp  
+rownames(data_HHS)=1:nrow(data_HHS)
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+# construct learning sample from data_HS
+```{r}
+
+
+Neg_data=Neg_loc[,1:4]
+rownames(Neg_data)=1:nrow(Neg_data)
+
+
+Neg_data$E0=rep(NA,nrow(Neg_data))
+Neg_data$E1=rep(NA,nrow(Neg_data))
+Neg_data$E2=rep(NA,nrow(Neg_data))
+Neg_data$E3=rep(NA,nrow(Neg_data))
+
+Neg_data$mean=rep(NA,nrow(Neg_data))
+
+Neg_data$std=rep(NA,nrow(Neg_data))
+Neg_data$kur=rep(NA,nrow(Neg_data))
+Neg_data$skew=rep(NA,nrow(Neg_data))
+Neg_data$acf1=rep(NA,nrow(Neg_data))
+Neg_data$acf2=rep(NA,nrow(Neg_data))
+Neg_data$tail=rep(NA,nrow(Neg_data))
+Neg_data$HS=rep(0,nrow(Neg_data))
+
+
+
+for( i in 1:nrow(Neg_data) ){
+
+  tempE0=Neg_loc[i,1]
+  tempE3=Neg_loc[i,4]
+  tempE2=Neg_loc[i,3]
+  tempE1=Neg_loc[i,2]
+  
+  
+  tempHHS=data[tempE0:tempE3,]
+  Neg_data$E0[i]=data$Price[tempE0]
+  Neg_data$E1[i]=data$Price[tempE1]
+  Neg_data$E2[i]=data$Price[tempE2]
+  Neg_data$E3[i]=data$Price[tempE3]
+  
+  
+  Neg_data$mean[i]=mean(tempHHS$Price_change)
+  Neg_data$std[i]=sd(tempHHS$Price_change)
+  Neg_data$kur[i]=kurtosis(tempHHS$Price_change)
+  Neg_data$skew[i]=skewness(tempHHS$Price_change)
+  Neg_data$acf1[i]=cor(tempHHS$Price_change,tempHHS$lag1,use = "complete.obs")
+  Neg_data$acf2[i]=cor(tempHHS$Price_change,tempHHS$lag2,use = "complete.obs") 
+ Neg_data$tail[i]=data$Price[tempE3+2]
+  
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+```{r}
+
+write.csv(Pos_data,file="Positive Case.csv")
+
+write.csv(Neg_data,file="Negative Case.csv")
+
+
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+Pos_data <- read.csv("Positive Case.csv")[,-1]
+Neg_data <- read.csv("Negative Case.csv")[,-1]
+data <- read.csv("data.csv")[-1]
+Pos_loc <- read.csv("Pos_loc.csv")[-1]
+Neg_loc <- read.csv("Neg_loc.csv")[-1]
+```
+
+
+```{r}
+# slope for the least square line
+#Pos data slope
+test=Pos_loc[,1:4]
+rownames(test)=1:nrow(test)
+colnames(test)=c('tE0','tE1','tE2','tE3')
+test$xmean=rep(NA,nrow(test))
+test$temp_mean = rep(NA,nrow(test))
+test$beta1 = rep(NA,nrow(test))
+test$beta0 = rep(NA, nrow(test))
+
+for( i in 1:nrow(test) ){
+  x = data$Price_change[test[i,1] : test[i,4]]
+  test$xmean[i]=mean(x)
+  temp = test[i,1] : test[i,4] - test[i,1] + 1
+  test$temp_mean[i] = mean(temp)
+  test$beta1[i] = sum((temp - test$temp_mean[i])*(x - test$xmean[i]))/ sum((temp - test$temp_mean[i])^2)
+  test$beta0[i] = test$xmean[i] - test$beta1[i]*test$temp_mean[i]
+  xbar = test$beta0[i] + test$beta1[i] * temp
+}
+
+
+#Neg data slope
+test_neg=Neg_loc[,1:4]
+rownames(test_neg)=1:nrow(test_neg)
+colnames(test_neg)=c('tE0','tE1','tE2','tE3')
+test_neg$xmean=rep(NA,nrow(test_neg))
+test_neg$temp_mean = rep(NA,nrow(test_neg))
+test_neg$beta1 = rep(NA,nrow(test_neg))
+test_neg$beta0 = rep(NA, nrow(test_neg))
+
+for( i in 1:nrow(test_neg) ){
+  x = data$Price_change[test_neg[i,1] : test_neg[i,4]]
+  test_neg$xmean[i]=mean(x)
+  temp = test_neg[i,1] : test_neg[i,4] - test_neg[i,1] + 1
+  test_neg$temp_mean[i] = mean(temp)
+  test_neg$beta1[i] = sum((temp - test_neg$temp_mean[i])*(x - test_neg$xmean[i]))/ sum((temp - test_neg$temp_mean[i])^2)
+  test_neg$beta0[i] = test_neg$xmean[i] - test_neg$beta1[i]*test_neg$temp_mean[i]
+  xbar = test_neg$beta0[i] + test_neg$beta1[i] * temp
+}
+# beta1 is a slope
+# beta0 is an intercept
+```
+
+
+```{r}
+# N1: the number of mean crossing
+N1_val <- rep(NA, nrow(test))
+for(j in 1:nrow(test)){
+      N1 <- function(i){
+      x  = data$Price_change[test[i,1] : test[i,4]]
+      n1 = rep(NA, length(x)-1)
+                for (j in 1 : length(x)-1){
+                 n1[j] <- ifelse ((x[j] -  mean(x))*(x[j+1] -  mean(x)) < 0, 1, 0)
+                 N1 <- sum(n1)}
+      return(N1)}
+  N1_val[j] <- N1(j)
+}
+
+N1_val_neg <- rep(NA, nrow(test_neg))
+for(j in 1:nrow(test_neg)){
+      N1 <- function(i){
+      x  = data$Price_change[test_neg[i,1] : test_neg[i,4]]
+      n1 = rep(NA, length(x)-1)
+                for (j in 1 : length(x)-1){
+                 n1[j] <- ifelse ((x[j] -  mean(x))*(x[j+1] -  mean(x)) < 0, 1, 0)
+                 N1 <- sum(n1)}
+      return(N1)}
+  N1_val_neg[j] <- N1(j)
+}
+#N1 values
+```
+
+
+```{r}
+#N2: the number of least square line crossing
+N2_val <- rep(NA, nrow(test))
+for(j in 1:nrow(test)){
+        N2 <- function(i){
+          x  = data$Price_change[test[i,1] : test[i,4]]
+          temp = test[i,1] : test[i,4] - test[i,1] + 1
+          xbar = test$beta0[i] + test$beta1[i] * temp
+          n2 = rep(NA, length(x)-1)
+          for (j in 1 : length(x)-1){
+                     n2[j] <- ifelse ((x[j] -  xbar[j])*(x[j+1] -  xbar[j+1]) < 0, 1, 0)
+                     N2 <- sum(n2)}
+          return(N2)}
+        N2_val[j] <- N2(j)
+}
+
+N2_val_neg <- rep(NA, nrow(test_neg))
+for(j in 1:nrow(test_neg)){
+        N2 <- function(i){
+          x  = data$Price_change[test_neg[i,1] : test_neg[i,4]]
+          temp = test_neg[i,1] : test_neg[i,4] - test_neg[i,1] + 1
+          xbar = test_neg$beta0[i] + test_neg$beta1[i] * temp
+          n2 = rep(NA, length(x)-1)
+          for (j in 1 : length(x)-1){
+                     n2[j] <- ifelse ((x[j] -  xbar[j])*(x[j+1] -  xbar[j+1]) < 0, 1, 0)
+                     N2 <- sum(n2)}
+          return(N2)}
+        N2_val_neg[j] <- N2(j)
+}
+#N2 Values
+```
+
+```{r}
+#APML: the area between the pattern and its mean line
+#sum(abs(x - xmean))
+APML_val <- rep(NA, nrow(test))
+for(j in 1:nrow(test)){
+        APML <- function(i){
+          x  = data$Price_change[test[i,1] : test[i,4]]
+          APML <- sum(abs(x - mean(x)))
+          return(APML)}
+        APML_val[j] <- APML(j)
+}
+
+APML_val_neg <- rep(NA, nrow(test_neg))
+for(j in 1:nrow(test_neg)){
+        APML <- function(i){
+          x  = data$Price_change[test_neg[i,1] : test_neg[i,4]]
+          APML <- sum(abs(x - mean(x)))
+          return(APML)}
+        APML_val_neg[j] <- APML(j)
+}
+#APML Values
+```
+
+
+```{r}
+#APSL: the area between the pattern and its least squares line
+#sum(abs(x - xbar2))
+APSL_val <- rep(NA, nrow(test))
+for(j in 1:nrow(test)){
+        APSL <- function(i){
+          x  = data$Price_change[test[i,1] : test[i,4]]
+          temp = test[i,1]:test[i,4] - test[i,1] + 1
+          xbar = test$beta0[i] + test$beta1[i] * temp
+          APSL = sum(abs(x - xbar))
+          return(APSL)}
+        APSL_val[j] <- APSL(j)
+}
+
+APSL_val_neg <- rep(NA, nrow(test_neg))
+for(j in 1:nrow(test_neg)){
+        APSL <- function(i){
+          x  = data$Price_change[test_neg[i,1] : test_neg[i,4]]
+          temp = test_neg[i,1] : test_neg[i,4] - test_neg[i,1] + 1
+          xbar = test_neg$beta0[i] + test_neg$beta1[i] * temp
+          APSL = sum(abs(x - xbar))
+          return(APSL)}
+        APSL_val_neg[j] <- APSL(j)
+}
+#APSL Values
+APSL(1)
+APSL(2)
+```
+
+```{r}
+#AAS: the area between the pattern and the line segments
+#sum(abs(xmean - xbar))
+AAS_val <- rep(NA, nrow(test))
+for(j in 1:nrow(test)){
+          AAS <- function(i){
+            x  = data$Price_change[test[i,1] : test[i,4]]
+            temp = test[i,1]:test[i,4] - test[i,1] + 1
+            xbar = test$beta0[i] + test$beta1[i] * temp
+            AAS <- sum(abs(mean(x) - xbar))
+            return(AAS)}
+          AAS_val[j] <- AAS(j)
+}
+
+AAS_val_neg <- rep(NA, nrow(test_neg))
+for(j in 1:nrow(test_neg)){
+          AAS <- function(i){
+            x  = data$Price_change[test_neg[i,1] : test_neg[i,4]]
+            temp = test_neg[i,1] : test_neg[i,4] - test_neg[i,1] + 1
+            xbar = test_neg$beta0[i] + test_neg$beta1[i] * temp
+            AAS <- sum(abs(mean(x) - xbar))
+            return(AAS)}
+          AAS_val_neg[j] <- AAS(j)
+}
+#AAS Values
+AAS(1)
+AAS(2)
+```
+
+```{r}
+
+Pos_data$beta1 <- test$beta1
+Pos_data$beta0 <- test$beta0
+Pos_data$N1_val <- N1_val
+Pos_data$N2_val <- N2_val
+Pos_data$APML_val <- APML_val
+Pos_data$APSL_val <- APSL_val
+Pos_data$AAS_val <- AAS_val
+
+Neg_data$beta1 <- test_neg$beta1
+Neg_data$beta0 <- test_neg$beta0
+Neg_data$N1_val <- N1_val_neg
+Neg_data$N2_val <- N2_val_neg
+Neg_data$APML_val <- APML_val_neg
+Neg_data$APSL_val <- APSL_val_neg
+Neg_data$AAS_val <- AAS_val_neg
+View(Pos_data)
+```
+
+
+```{r}
+
+plot(Pos_data$beta1, type = "l", ylab = "Slope", xlab = "Case")
+plot(Pos_data$N1_val, type = "l", ylab = "N1", xlab = "Case")
+plot(Pos_data$N2_val, type = "l", ylab = "N2", xlab = "Case")
+plot(Pos_data$APML_val, type = "l", ylab = "APML", xlab = "Case")
+plot(Pos_data$APSL_val, type = "l", ylab = "APSL", xlab = "Case")
+plot(Pos_data$AAS_val, type = "l", ylab = "AAS", xlab = "Case")
+
+plot(Neg_data$beta1, type = "l", ylab = "Slope", xlab = "Case")
+plot(Neg_data$N1_val, type = "l", ylab = "N1", xlab = "Case")
+plot(Neg_data$N2_val, type = "l", ylab = "N2", xlab = "Case")
+plot(Neg_data$APML_val, type = "l", ylab = "APML", xlab = "Case")
+plot(Neg_data$APSL_val, type = "l", ylab = "APSL", xlab = "Case")
+plot(Neg_data$AAS_val, type = "l", ylab = "AAS", xlab = "Case")
+
+
+```
+
+
+
+```{r}
+##
+Pos_data$duration <- Pos_data$tE3 - Pos_data$tE0 +1
+Pos_data$Height <- data$Price[Pos_data$tE3+1] - Pos_data$E1
+```
+
+
+```{r}
+train_pos <- read.csv("Positive Case 2.csv")
+train_neg <- read.csv("Negative Case 2.csv")
+data <- read.csv("data.csv")[-1]
+train_neg$duration <- train_neg$tE3 - train_neg$tE0 +1
+train_neg$Height <- data$Price[train_neg$tE3+1] - train_neg$E1
+
+train_pos <- train_pos[, 10:26]
+train_neg <- train_neg[, 10:26]
+train <- as.data.frame(rbind(train_pos, train_neg))
+train$HS <- as.factor(train$HS)
+
+set.seed(23)
+test_idx <- sample(1:nrow(train), 0.2*nrow(train))
+test <- train[test_idx, ]
+train <- train[-test_idx, ]
+```
+
+
+# Fit Random Forest
+
+```{r}
+library(randomForest)
+p <- ncol(train) - 1
+rf <- randomForest(HS ~ ., data = train, importance = T)
+pred <- predict(rf, test[, -8]) # exclude response "HS"
+mean(pred != test[, 8])
+importance(rf)
+rf$confusion
+```
+
+
+# Fit Decision Tree
+
+```{r}
+library(rpart)
+library(rpart.plot)
+dt <- rpart(HS ~., data = train, method = "class", 
+            parms = list(split='information'))
+pred.dt <- predict(dt, test[, -8], type = "class")
+mean(pred.dt != test[, 8])
+
+rpart.plot(dt)
+```
+
